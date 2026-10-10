@@ -1,0 +1,221 @@
+// ============================================================
+// School Timetabling — Prisma Schema
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────
+
+enum ClassroomType {
+  STANDARD
+  LAB
+  GYM
+  AUDITORIUM
+  WORKSHOP
+}
+
+enum ConstraintType {
+  MAX_CONSECUTIVE_HOURS  // e.g. Math max 2 consecutive hours
+  MIN_GAP_BETWEEN        // e.g. PE needs 1 free period after
+  PREFERRED_DAY          // e.g. Art preferred on Fridays
+  FORBIDDEN_SLOT         // e.g. never first period Monday
+  MAX_DAILY_HOURS        // e.g. max 3 hours of Math per day
+}
+
+// ─── Teacher ─────────────────────────────────────────────────
+
+/// A teaching staff member and their weekly availability.
+/// available_hours: { "monday": [1,2,3,4,5], "tuesday": [...], ... }
+/// unavailable_slots: ["MON_1", "TUE_3", "FRI_8", ...] — blocked periods
+model Teacher {
+  id                String   @id @default(cuid())
+  name              String
+  email             String?  @unique
+  available_hours   Json     @default("{}")
+  unavailable_slots Json     @default("[]")  // blocked slots as string array
+
+  assignments    Assignment[]
+  timetableSlots TimetableSlot[]
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("teachers")
+}
+
+// ─── Grade (Class) ───────────────────────────────────────────
+
+/// A school class/grade, e.g. "9-A", "10-B".
+model Grade {
+  id          String   @id @default(cuid())
+  name        String   @unique  // e.g. "9-A"
+  year        Int?               // optional: year level (9, 10, 11...)
+  studentCount Int?
+
+  assignments    Assignment[]
+  timetableSlots TimetableSlot[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("grades")
+}
+
+// ─── Subject ─────────────────────────────────────────────────
+
+/// An academic subject, e.g. "Mathematics", "History".
+model Subject {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  code        String?  @unique   // short code, e.g. "MATH", "HIST"
+  color       String?            // hex color for UI display
+
+  assignments    Assignment[]
+  constraints    Constraint[]
+  timetableSlots TimetableSlot[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("subjects")
+}
+
+// ─── Classroom ───────────────────────────────────────────────
+
+/// A physical room that can host classes.
+model Classroom {
+  id       String        @id @default(cuid())
+  name     String        @unique   // e.g. "Room 101", "Science Lab A"
+  capacity Int
+  type     ClassroomType @default(STANDARD)
+  building String?                 // optional building identifier
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("classrooms")
+}
+
+// ─── Constraint ──────────────────────────────────────────────
+
+/// A scheduling rule applied to a subject.
+/// value stores rule-specific data as JSON:
+///   MAX_CONSECUTIVE_HOURS -> { "max": 2 }
+///   PREFERRED_DAY         -> { "day": "friday" }
+///   FORBIDDEN_SLOT        -> { "day": "monday", "period": 1 }
+model Constraint {
+  id        String         @id @default(cuid())
+  type      ConstraintType
+  value     Json           @default("{}")
+  notes     String?
+
+  subjectId String
+  subject   Subject        @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("constraints")
+}
+
+// ─── Assignment ──────────────────────────────────────────────
+
+/// Links a Teacher → Grade → Subject with weekly hour count.
+/// This is the core scheduling unit the algorithm will work with.
+model Assignment {
+  id           String  @id @default(cuid())
+  hoursPerWeek Int     // how many periods per week this combo requires
+
+  teacherId  String
+  teacher    Teacher @relation(fields: [teacherId], references: [id], onDelete: Restrict)
+
+  gradeId    String
+  grade      Grade   @relation(fields: [gradeId], references: [id], onDelete: Restrict)
+
+  subjectId  String
+  subject    Subject @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+
+  timetableSlots TimetableSlot[]
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // A teacher can only be assigned to one grade for a given subject
+  @@unique([teacherId, gradeId, subjectId])
+  @@map("assignments")
+}
+
+// ─── School Settings ─────────────────────────────────────────
+
+/// Singleton school structure + global scheduling rule toggles.
+model SchoolSettings {
+  id String @id @default("default")
+
+  daysPerWeek Int @default(5)
+  hoursPerDay Int @default(8)
+
+  /// Hard (when enabled): same subject cannot occupy more than N consecutive periods in a class
+  maxConsecutiveSameSubject Boolean @default(true)
+  maxConsecutiveHours       Int     @default(2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("school_settings")
+}
+
+enum TimetableStatus {
+  ACTIVE
+  SUPERSEDED
+}
+
+// ─── Generated Timetable ─────────────────────────────────────
+
+model Timetable {
+  id          String          @id @default(cuid())
+  status      TimetableStatus @default(ACTIVE)
+  daysPerWeek Int
+  hoursPerDay Int
+  slots       TimetableSlot[]
+
+  createdAt DateTime @default(now())
+
+  @@map("timetables")
+}
+
+model TimetableSlot {
+  id          String    @id @default(cuid())
+  timetableId String
+  timetable   Timetable @relation(fields: [timetableId], references: [id], onDelete: Cascade)
+
+  slotKey String // e.g. "MON_1"
+  day     String // MON, TUE, ...
+  period  Int
+
+  assignmentId String
+  assignment   Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Restrict)
+
+  gradeId String
+  grade   Grade @relation(fields: [gradeId], references: [id], onDelete: Restrict)
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  @@unique([timetableId, gradeId, slotKey])
+  @@unique([timetableId, teacherId, slotKey])
+  @@index([timetableId, teacherId])
+  @@index([timetableId, gradeId])
+  @@map("timetable_slots")
+}
